@@ -39,12 +39,41 @@ if 'selected_question_id' not in st.session_state:
 if 'show_explanations' not in st.session_state:
     st.session_state.show_explanations = False
 
+# ====================== HELPER FUNCTIONS ======================
+def validate_question(q):
+    """
+    Validate that a question dictionary has all required fields
+    
+    Args:
+        q: Question dictionary
+        
+    Returns:
+        bool: True if valid, False otherwise
+    """
+    if not isinstance(q, dict):
+        return False
+    
+    required_fields = ['question', 'options', 'correct_option']
+    if not all(field in q for field in required_fields):
+        return False
+    
+    # Ensure options is a list
+    if not isinstance(q.get('options'), list):
+        return False
+    
+    # Ensure each option has required fields
+    for opt in q.get('options', []):
+        if not isinstance(opt, dict) or 'letter' not in opt or 'text' not in opt:
+            return False
+    
+    return True
+
 # ====================== DATABASE CONNECTION ======================
 @st.cache_resource
 def get_mongodb_client():
     try:
         # Get MongoDB connection string from environment variables, fall back to localhost if not set
-        mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017/")
+        mongo_uri = os.getenv("MONGODB_URI", "mongodb+srv://jen:jen@cluster0.unvrrrs.mongodb.net/?retryWrites=true&w=majority&AI-Quiz=Cluster0")
         client = pymongo.MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
         # Verify connection works
         client.server_info()
@@ -62,8 +91,11 @@ if client:
     quiz_history_collection = db["quiz_history"]
     
     # Create indexes for better performance
-    users_collection.create_index("username", unique=True)
-    questions_collection.create_index("topic")
+    try:
+        users_collection.create_index("username", unique=True)
+        questions_collection.create_index("topic")
+    except Exception as e:
+        st.error(f"Error creating database indexes: {e}")
 else:
     st.error("Failed to connect to database. Please check your connection.")
 
@@ -191,15 +223,15 @@ def get_gemini_quiz_analysis(stats_data):
     try:
         # Extract key statistics to send to Gemini
         if not stats_data or "topic_stats" not in stats_data or not stats_data["topic_stats"]:
-            return {"error": "Insufficient data for analysis"}
+            return {"success": False, "error": "Insufficient data for analysis"}
         
         # Format topic statistics for analysis
         topic_stats_formatted = []
-        for topic in stats_data["topic_stats"]:
+        for topic in stats_data.get("topic_stats", []):
             topic_stats_formatted.append({
-                "topic": topic["_id"],
-                "attempts": topic["attempts"],
-                "avg_score": round(topic["avg_score"], 2)
+                "topic": topic.get("_id", "Unknown"),
+                "attempts": topic.get("attempts", 0),
+                "avg_score": round(topic.get("avg_score", 0), 2)
             })
             
         # Format time-based statistics if available
@@ -207,9 +239,9 @@ def get_gemini_quiz_analysis(stats_data):
         if "daily_stats" in stats_data and stats_data["daily_stats"]:
             time_stats_formatted = [
                 {
-                    "date": day["_id"],
-                    "count": day["count"],
-                    "avg_score": round(day["avg_score"], 2)
+                    "date": day.get("_id", "Unknown"),
+                    "count": day.get("count", 0),
+                    "avg_score": round(day.get("avg_score", 0), 2)
                 }
                 for day in stats_data["daily_stats"][-7:]  # Last 7 days
             ]
@@ -219,9 +251,9 @@ def get_gemini_quiz_analysis(stats_data):
         if "difficult_topics" in stats_data and stats_data["difficult_topics"]:
             difficult_topics = [
                 {
-                    "topic": topic["_id"],
-                    "avg_score": round(topic["avg_score"], 2),
-                    "attempts": topic["attempts"]
+                    "topic": topic.get("_id", "Unknown"),
+                    "avg_score": round(topic.get("avg_score", 0), 2),
+                    "attempts": topic.get("attempts", 0)
                 }
                 for topic in stats_data["difficult_topics"][:3]  # Top 3 difficult topics
             ]
@@ -239,11 +271,19 @@ def get_gemini_quiz_analysis(stats_data):
         
         TOPIC STATISTICS:
         {json.dumps(topic_stats_formatted, indent=2)}
+        """
         
-        {f"RECENT ACTIVITY (LAST 7 DAYS):\\n{json.dumps(time_stats_formatted, indent=2)}" if time_stats_formatted else ""}
+        # Add recent activity if available
+        if time_stats_formatted:
+            recent_activity = f"RECENT ACTIVITY (LAST 7 DAYS):\n{json.dumps(time_stats_formatted, indent=2)}"
+            prompt += f"\n{recent_activity}"
+            
+        # Add challenging topics if available
+        if difficult_topics:
+            challenging_topics = f"MOST CHALLENGING TOPICS:\n{json.dumps(difficult_topics, indent=2)}"
+            prompt += f"\n{challenging_topics}"
         
-        {f"MOST CHALLENGING TOPICS:\\n{json.dumps(difficult_topics, indent=2)}" if difficult_topics else ""}
-        
+        prompt += """
         Provide your analysis in the following format:
         1. Key Insights (3-4 bullet points about what the data reveals)
         2. Recommendations (3-4 concrete suggestions to improve quiz performance or engagement)
@@ -331,18 +371,22 @@ def get_gemini_user_analysis(user_stats):
         
         # Format topic statistics for analysis
         topic_stats_formatted = []
-        if "topic_stats" in user_stats and not user_stats["topic_stats"].empty:
-            topic_data = user_stats["topic_stats"].to_dict('records')
-            topic_stats_formatted = [
-                {
-                    "topic": topic["Topic"],
-                    "avg_score": topic["Average Score (%)"],
-                    "attempts": topic["Attempts"],
-                    "min_score": topic.get("Min Score (%)", "N/A"),
-                    "max_score": topic.get("Max Score (%)", "N/A")
-                }
-                for topic in topic_data
-            ]
+        if "topic_stats" in user_stats and hasattr(user_stats["topic_stats"], 'empty') and not user_stats["topic_stats"].empty:
+            try:
+                topic_data = user_stats["topic_stats"].to_dict('records')
+                topic_stats_formatted = [
+                    {
+                        "topic": topic.get("Topic", "Unknown"),
+                        "avg_score": topic.get("Average Score (%)", 0),
+                        "attempts": topic.get("Attempts", 0),
+                        "min_score": topic.get("Min Score (%)", "N/A"),
+                        "max_score": topic.get("Max Score (%)", "N/A")
+                    }
+                    for topic in topic_data
+                ]
+            except Exception as e:
+                st.error(f"Error processing topic stats: {e}")
+                topic_stats_formatted = []
         
         # Format performance trend data
         performance_trend = "No trend data available"
@@ -353,20 +397,28 @@ def get_gemini_user_analysis(user_stats):
         
         # Format time and day performance data
         time_performance = []
-        if "hour_performance" in user_stats and not user_stats["hour_performance"].empty:
-            time_data = user_stats["hour_performance"].to_dict('records')
-            time_performance = [
-                {"hour": hour["Hour"], "avg_score": hour["Average Score (%)"]}
-                for hour in time_data
-            ]
+        if "hour_performance" in user_stats and hasattr(user_stats["hour_performance"], 'empty') and not user_stats["hour_performance"].empty:
+            try:
+                time_data = user_stats["hour_performance"].to_dict('records')
+                time_performance = [
+                    {"hour": hour.get("Hour", 0), "avg_score": hour.get("Average Score (%)", 0)}
+                    for hour in time_data
+                ]
+            except Exception as e:
+                st.error(f"Error processing hour performance: {e}")
+                time_performance = []
         
         day_performance = []
-        if "day_performance" in user_stats and not user_stats["day_performance"].empty:
-            day_data = user_stats["day_performance"].to_dict('records')
-            day_performance = [
-                {"day": day["Day"], "avg_score": day["Average Score (%)"]}
-                for day in day_data
-            ]
+        if "day_performance" in user_stats and hasattr(user_stats["day_performance"], 'empty') and not user_stats["day_performance"].empty:
+            try:
+                day_data = user_stats["day_performance"].to_dict('records')
+                day_performance = [
+                    {"day": day.get("Day", "Unknown"), "avg_score": day.get("Average Score (%)", 0)}
+                    for day in day_data
+                ]
+            except Exception as e:
+                st.error(f"Error processing day performance: {e}")
+                day_performance = []
         
         # Create a prompt for Gemini to analyze the data
         prompt = f"""
@@ -383,13 +435,24 @@ def get_gemini_user_analysis(user_stats):
         
         TOPIC PERFORMANCE:
         {json.dumps(topic_stats_formatted, indent=2)}
+        """
         
-        {f"TIME OF DAY PERFORMANCE:\\n{json.dumps(time_performance, indent=2)}" if time_performance else ""}
+        # Add time of day performance if available
+        if time_performance:
+            time_of_day = f"TIME OF DAY PERFORMANCE:\n{json.dumps(time_performance, indent=2)}"
+            prompt += f"\n{time_of_day}"
+            
+        # Add day of week performance if available
+        if day_performance:
+            day_of_week = f"DAY OF WEEK PERFORMANCE:\n{json.dumps(day_performance, indent=2)}"
+            prompt += f"\n{day_of_week}"
+            
+        # Add quiz speed if available
+        if 'avg_questions_per_minute' in user_stats:
+            quiz_speed = f"QUIZ SPEED: {user_stats.get('avg_questions_per_minute', 'N/A')} questions per minute"
+            prompt += f"\n{quiz_speed}"
         
-        {f"DAY OF WEEK PERFORMANCE:\\n{json.dumps(day_performance, indent=2)}" if day_performance else ""}
-        
-        {f"QUIZ SPEED: {user_stats.get('avg_questions_per_minute', 'N/A')} questions per minute" if 'avg_questions_per_minute' in user_stats else ""}
-        
+        prompt += """
         Provide your analysis in the following format:
         1. Performance Summary (an overview of the student's performance)
         2. Strengths (identify 2-3 areas where the student is performing well)
@@ -653,7 +716,7 @@ def login_user(username, password):
     try:
         user = users_collection.find_one({"username": username})
         
-        if user and user["password"] == hash_password(password):
+        if user and user.get("password") == hash_password(password):
             return True, user
         
         return False, None
@@ -680,25 +743,44 @@ def save_questions_to_db(topic, questions):
     try:
         if not topic or not questions:
             return False, "Topic and questions cannot be empty"
-            
-        for question in questions:
+        
+        valid_questions = [q for q in questions if validate_question(q)]
+        if not valid_questions:
+            return False, "No valid questions to save"
+        
+        inserted_count = 0
+        for question in valid_questions:
             question_data = {
                 "topic": topic,
-                "question": question["question"],
-                "options": question["options"],
-                "correct_option": question["correct_option"],
+                "question": question.get("question", ""),
+                "options": question.get("options", []),
+                "correct_option": question.get("correct_option", ""),
                 "created_at": datetime.datetime.now(),
                 "created_by": st.session_state.user_id
             }
-            questions_collection.insert_one(question_data)
+            result = questions_collection.insert_one(question_data)
+            if result.inserted_id:
+                inserted_count += 1
         
-        return True, f"Successfully saved {len(questions)} questions"
+        if inserted_count > 0:
+            return True, f"Successfully saved {inserted_count} questions"
+        else:
+            return False, "Failed to save questions"
     except Exception as e:
         return False, f"Error saving questions: {str(e)}"
 
 def update_question(question_id, question_text, options, correct_option):
     """Update an existing question in the database"""
     try:
+        # Validate inputs
+        if not question_text or not options or not correct_option:
+            return False, "Question text, options, and correct option are required"
+        
+        # Ensure all options have required fields
+        for opt in options:
+            if "letter" not in opt or "text" not in opt:
+                return False, "Option is missing required fields"
+        
         questions_collection.update_one(
             {"_id": ObjectId(question_id)},
             {"$set": {
@@ -734,9 +816,19 @@ def get_topics():
 
 @st.cache_data(ttl=30)  # Cache for 30 seconds
 def get_questions_by_topic(topic):
-    """Get all questions for a specific topic"""
+    """Get all questions for a specific topic with validation"""
     try:
-        return list(questions_collection.find({"topic": topic}))
+        questions = list(questions_collection.find({"topic": topic}))
+        
+        # Validate each question and log issues
+        valid_questions = []
+        for i, q in enumerate(questions):
+            if validate_question(q):
+                valid_questions.append(q)
+            else:
+                print(f"Warning: Invalid question found in topic '{topic}', question index {i}")
+        
+        return valid_questions
     except Exception as e:
         st.error(f"Error fetching questions: {e}")
         return []
@@ -763,12 +855,15 @@ def start_quiz(topic, num_questions=5):
     try:
         questions = list(questions_collection.find({"topic": topic}).limit(num_questions))
         
-        if not questions:
-            return False, "No questions available for this topic"
+        # Validate questions before starting quiz
+        valid_questions = [q for q in questions if validate_question(q)]
+        
+        if not valid_questions:
+            return False, "No valid questions available for this topic"
         
         st.session_state.current_quiz = {
             "topic": topic,
-            "questions": questions,
+            "questions": valid_questions,
             "start_time": datetime.datetime.now()
         }
         
@@ -787,11 +882,11 @@ def submit_quiz():
             return False, "No active quiz"
         
         score = 0
-        total_questions = len(st.session_state.current_quiz["questions"])
+        total_questions = len(st.session_state.current_quiz.get("questions", []))
         
-        for question in st.session_state.current_quiz["questions"]:
-            question_id = str(question["_id"])
-            if question_id in st.session_state.user_answers and st.session_state.user_answers[question_id] == question["correct_option"]:
+        for question in st.session_state.current_quiz.get("questions", []):
+            question_id = str(question.get("_id", ""))
+            if question_id in st.session_state.user_answers and st.session_state.user_answers[question_id] == question.get("correct_option", ""):
                 score += 1
         
         score_percentage = (score / total_questions) * 100 if total_questions > 0 else 0
@@ -800,11 +895,11 @@ def submit_quiz():
         quiz_history = {
             "user_id": st.session_state.user_id,
             "username": st.session_state.username,
-            "topic": st.session_state.current_quiz["topic"],
+            "topic": st.session_state.current_quiz.get("topic", "Unknown"),
             "score": score,
             "total_questions": total_questions,
             "score_percentage": score_percentage,
-            "start_time": st.session_state.current_quiz["start_time"],
+            "start_time": st.session_state.current_quiz.get("start_time", datetime.datetime.now()),
             "end_time": datetime.datetime.now(),
             "user_answers": st.session_state.user_answers
         }
@@ -1086,13 +1181,13 @@ def render_admin_quiz_stats():
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("Total Quiz Attempts", stats["total_attempts"])
+        st.metric("Total Quiz Attempts", stats.get("total_attempts", 0))
     
     with col2:
-        st.metric("Unique Users", stats["unique_users"])
+        st.metric("Unique Users", stats.get("unique_users", 0))
     
     with col3:
-        st.metric("Average Score", f"{stats['avg_score']:.1f}%")
+        st.metric("Average Score", f"{stats.get('avg_score', 0):.1f}%")
     
     # Calculate quiz completion rate
     if "topic_stats" in stats and stats["topic_stats"]:
@@ -1140,32 +1235,38 @@ def render_admin_quiz_stats():
         
         if "topic_stats" in stats and stats["topic_stats"]:
             # Convert to DataFrame for display
-            topic_df = pd.DataFrame(stats["topic_stats"])
-            topic_df.columns = ["Topic", "Attempts", "Average Score (%)"]
-            topic_df["Average Score (%)"] = topic_df["Average Score (%)"].round(2)
-            
-            # Allow sorting by different columns
-            sort_by = st.radio("Sort by:", ["Attempts", "Average Score (%)", "Topic"], horizontal=True)
-            ascending = sort_by == "Topic"  # Ascending for alphabetical, descending for metrics
-            
-            sorted_df = topic_df.sort_values(sort_by, ascending=ascending)
-            st.dataframe(sorted_df, use_container_width=True)
-            
-            # Visualization
-            st.subheader("Average Score by Topic")
-            chart_df = sorted_df.sort_values("Average Score (%)", ascending=False)
-            st.bar_chart(chart_df.set_index("Topic")["Average Score (%)"])
-            
-            st.subheader("Topic Popularity")
-            st.bar_chart(chart_df.set_index("Topic")["Attempts"])
+            try:
+                topic_df = pd.DataFrame(stats["topic_stats"])
+                topic_df.columns = ["Topic", "Attempts", "Average Score (%)"]
+                topic_df["Average Score (%)"] = topic_df["Average Score (%)"].round(2)
+                
+                # Allow sorting by different columns
+                sort_by = st.radio("Sort by:", ["Attempts", "Average Score (%)", "Topic"], horizontal=True)
+                ascending = sort_by == "Topic"  # Ascending for alphabetical, descending for metrics
+                
+                sorted_df = topic_df.sort_values(sort_by, ascending=ascending)
+                st.dataframe(sorted_df, use_container_width=True)
+                
+                # Visualization
+                st.subheader("Average Score by Topic")
+                chart_df = sorted_df.sort_values("Average Score (%)", ascending=False)
+                st.bar_chart(chart_df.set_index("Topic")["Average Score (%)"])
+                
+                st.subheader("Topic Popularity")
+                st.bar_chart(chart_df.set_index("Topic")["Attempts"])
+            except Exception as e:
+                st.error(f"Error displaying topic analysis: {e}")
             
             # Most difficult topics (lowest avg scores)
             if "difficult_topics" in stats and stats["difficult_topics"]:
-                st.subheader("Most Challenging Topics")
-                difficult_df = pd.DataFrame(stats["difficult_topics"])
-                difficult_df.columns = ["Topic", "Average Score (%)", "Attempts"]
-                difficult_df["Average Score (%)"] = difficult_df["Average Score (%)"].round(2)
-                st.dataframe(difficult_df, use_container_width=True)
+                try:
+                    st.subheader("Most Challenging Topics")
+                    difficult_df = pd.DataFrame(stats["difficult_topics"])
+                    difficult_df.columns = ["Topic", "Average Score (%)", "Attempts"]
+                    difficult_df["Average Score (%)"] = difficult_df["Average Score (%)"].round(2)
+                    st.dataframe(difficult_df, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error displaying challenging topics: {e}")
         else:
             st.info("No topic data available yet.")
     
@@ -1174,25 +1275,31 @@ def render_admin_quiz_stats():
         st.subheader("Quiz Activity Over Time")
         
         if "daily_stats" in stats and stats["daily_stats"]:
-            # Convert to DataFrame
-            daily_df = pd.DataFrame(stats["daily_stats"])
-            daily_df.columns = ["Date", "Quizzes Taken", "Average Score (%)"]
-            daily_df["Date"] = pd.to_datetime(daily_df["Date"])
-            daily_df["Average Score (%)"] = daily_df["Average Score (%)"].round(2)
-            
-            # Line chart for quiz activity
-            st.line_chart(daily_df.set_index("Date")["Quizzes Taken"])
-            
-            st.subheader("Average Score Trend")
-            st.line_chart(daily_df.set_index("Date")["Average Score (%)"])
+            try:
+                # Convert to DataFrame
+                daily_df = pd.DataFrame(stats["daily_stats"])
+                daily_df.columns = ["Date", "Quizzes Taken", "Average Score (%)"]
+                daily_df["Date"] = pd.to_datetime(daily_df["Date"])
+                daily_df["Average Score (%)"] = daily_df["Average Score (%)"].round(2)
+                
+                # Line chart for quiz activity
+                st.line_chart(daily_df.set_index("Date")["Quizzes Taken"])
+                
+                st.subheader("Average Score Trend")
+                st.line_chart(daily_df.set_index("Date")["Average Score (%)"])
+            except Exception as e:
+                st.error(f"Error displaying time analysis: {e}")
             
             # Time of day analysis if available
             if "time_spent" in stats and stats["time_spent"]:
-                st.subheader("Average Time Spent by Topic")
-                time_df = pd.DataFrame(stats["time_spent"])
-                time_df.columns = ["Topic", "Average Duration (sec)", "Count"]
-                time_df["Average Duration (min)"] = (time_df["Average Duration (sec)"] / 60).round(2)
-                st.dataframe(time_df[["Topic", "Average Duration (min)", "Count"]], use_container_width=True)
+                try:
+                    st.subheader("Average Time Spent by Topic")
+                    time_df = pd.DataFrame(stats["time_spent"])
+                    time_df.columns = ["Topic", "Average Duration (sec)", "Count"]
+                    time_df["Average Duration (min)"] = (time_df["Average Duration (sec)"] / 60).round(2)
+                    st.dataframe(time_df[["Topic", "Average Duration (min)", "Count"]], use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error displaying time spent analysis: {e}")
         else:
             st.info("No time-based data available yet.")
     
@@ -1234,18 +1341,21 @@ def render_admin_quiz_stats():
         st.subheader("Recent Quiz Activity")
         
         if "recent_quizzes" in stats and stats["recent_quizzes"]:
-            recent_df = pd.DataFrame([
-                {
-                    "Username": q["username"],
-                    "Topic": q["topic"],
-                    "Score": f"{q['score']}/{q['total_questions']} ({q['score_percentage']:.1f}%)",
-                    "Date": q["end_time"].strftime("%Y-%m-%d %H:%M"),
-                    "Duration": f"{(q['end_time'] - q['start_time']).seconds // 60}m {(q['end_time'] - q['start_time']).seconds % 60}s"
-                }
-                for q in stats["recent_quizzes"]
-            ])
-            
-            st.dataframe(recent_df, use_container_width=True)
+            try:
+                recent_df = pd.DataFrame([
+                    {
+                        "Username": q.get("username", "Unknown"),
+                        "Topic": q.get("topic", "Unknown"),
+                        "Score": f"{q.get('score', 0)}/{q.get('total_questions', 0)} ({q.get('score_percentage', 0):.1f}%)",
+                        "Date": q.get("end_time", datetime.datetime.now()).strftime("%Y-%m-%d %H:%M"),
+                        "Duration": f"{(q.get('end_time', datetime.datetime.now()) - q.get('start_time', datetime.datetime.now())).seconds // 60}m {(q.get('end_time', datetime.datetime.now()) - q.get('start_time', datetime.datetime.now())).seconds % 60}s"
+                    }
+                    for q in stats["recent_quizzes"]
+                ])
+                
+                st.dataframe(recent_df, use_container_width=True)
+            except Exception as e:
+                st.error(f"Error displaying recent activity: {e}")
         else:
             st.info("No recent quiz activity available.")
     
@@ -1255,56 +1365,61 @@ def render_admin_quiz_stats():
         st.markdown("Select a topic to get AI-powered analysis and recommendations")
         
         if "topic_stats" in stats and stats["topic_stats"]:
-            # Convert to selectable format
-            topics_data = {topic["_id"]: {"avg_score": topic["avg_score"], "attempts": topic["attempts"]} 
-                         for topic in stats["topic_stats"]}
-            
-            # Topic selector
-            selected_topic = st.selectbox("Choose a topic to analyze:", 
-                                       list(topics_data.keys()),
-                                       format_func=lambda x: f"{x} (Avg: {topics_data[x]['avg_score']:.1f}%, Attempts: {topics_data[x]['attempts']})")
-            
-            if selected_topic:
-                with st.spinner(f"Analyzing topic: {selected_topic}..."):
-                    topic_analysis = get_gemini_topic_recommendations(
-                        selected_topic, 
-                        topics_data[selected_topic]
-                    )
+            try:
+                # Convert to selectable format
+                topics_data = {topic.get("_id", "Unknown"): {
+                    "avg_score": topic.get("avg_score", 0), 
+                    "attempts": topic.get("attempts", 0)
+                } for topic in stats["topic_stats"]}
                 
-                if topic_analysis.get("success", False):
-                    # Display the topic analysis in a structured way
-                    st.markdown(f"### Analysis for: {selected_topic}")
+                # Topic selector
+                selected_topic = st.selectbox("Choose a topic to analyze:", 
+                                           list(topics_data.keys()),
+                                           format_func=lambda x: f"{x} (Avg: {topics_data[x]['avg_score']:.1f}%, Attempts: {topics_data[x]['attempts']})")
+                
+                if selected_topic:
+                    with st.spinner(f"Analyzing topic: {selected_topic}..."):
+                        topic_analysis = get_gemini_topic_recommendations(
+                            selected_topic, 
+                            topics_data[selected_topic]
+                        )
                     
-                    # Topic overview
-                    st.markdown("#### Topic Overview")
-                    for line in topic_analysis.get("overview", []):
-                        st.markdown(line)
-                    
-                    # Common challenges
-                    st.markdown("#### Common Challenges")
-                    for line in topic_analysis.get("challenges", []):
-                        st.markdown(line)
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # Study strategies
-                        st.markdown("#### Study Strategies")
-                        for line in topic_analysis.get("strategies", []):
+                    if topic_analysis.get("success", False):
+                        # Display the topic analysis in a structured way
+                        st.markdown(f"### Analysis for: {selected_topic}")
+                        
+                        # Topic overview
+                        st.markdown("#### Topic Overview")
+                        for line in topic_analysis.get("overview", []):
                             st.markdown(line)
-                    
-                    with col2:
-                        # Recommended resources
-                        st.markdown("#### Recommended Resources")
-                        for line in topic_analysis.get("resources", []):
+                        
+                        # Common challenges
+                        st.markdown("#### Common Challenges")
+                        for line in topic_analysis.get("challenges", []):
                             st.markdown(line)
-                    
-                    # Practice approach
-                    st.markdown("#### Practice Approach")
-                    for line in topic_analysis.get("practice", []):
-                        st.markdown(line)
-                else:
-                    st.error(f"Failed to generate topic analysis: {topic_analysis.get('error', 'Unknown error')}")
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            # Study strategies
+                            st.markdown("#### Study Strategies")
+                            for line in topic_analysis.get("strategies", []):
+                                st.markdown(line)
+                        
+                        with col2:
+                            # Recommended resources
+                            st.markdown("#### Recommended Resources")
+                            for line in topic_analysis.get("resources", []):
+                                st.markdown(line)
+                        
+                        # Practice approach
+                        st.markdown("#### Practice Approach")
+                        for line in topic_analysis.get("practice", []):
+                            st.markdown(line)
+                    else:
+                        st.error(f"Failed to generate topic analysis: {topic_analysis.get('error', 'Unknown error')}")
+            except Exception as e:
+                st.error(f"Error in Topic Explorer: {e}")
         else:
             st.info("No topic data available yet.")
 
@@ -1325,16 +1440,16 @@ def render_user_performance_stats():
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("Quizzes Taken", user_stats["total_quizzes"])
+        st.metric("Quizzes Taken", user_stats.get("total_quizzes", 0))
     
     with col2:
-        st.metric("Questions Answered", user_stats["total_questions"])
+        st.metric("Questions Answered", user_stats.get("total_questions", 0))
     
     with col3:
-        st.metric("Correct Answers", user_stats["correct_answers"])
+        st.metric("Correct Answers", user_stats.get("correct_answers", 0))
     
     with col4:
-        st.metric("Average Score", f"{user_stats['avg_score']:.1f}%")
+        st.metric("Average Score", f"{user_stats.get('avg_score', 0):.1f}%")
     
     # Get Gemini-powered personalized insights
     with st.spinner("Generating your personalized learning insights..."):
@@ -1373,7 +1488,7 @@ def render_user_performance_stats():
             st.info(motivation_text)
     
     # Show improvement trend if available
-    if user_stats["recent_trend"] is not None:
+    if user_stats.get("recent_trend") is not None:
         trend_text = "improving" if user_stats["recent_trend"] > 0 else "declining"
         trend_value = abs(user_stats["recent_trend"])
         st.info(f"Your performance is {trend_text} by {trend_value:.1f}% since your first quiz.")
@@ -1386,49 +1501,52 @@ def render_user_performance_stats():
         st.subheader("Your Progress Over Time")
         
         # Performance over time chart
-        quiz_history = user_stats["quizzes"]
+        quiz_history = user_stats.get("quizzes", [])
         
         if len(quiz_history) > 1:
-            # Create a time series chart
-            history_df = pd.DataFrame(quiz_history)
-            history_df["date"] = history_df["end_time"]
-            history_df = history_df.sort_values("date")
-            
-            chart_data = pd.DataFrame({
-                "Date": history_df["date"],
-                "Score (%)": history_df["score_percentage"]
-            })
-            
-            st.line_chart(chart_data.set_index("Date")["Score (%)"])
-            
-            # Add linear trend line calculation
-            # Convert dates to numbers for linear regression
-            x = np.array(range(len(history_df)))
-            y = history_df["score_percentage"].values
-            
-            slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
-            
-            if abs(r_value) > 0.3:  # Check if there's a meaningful correlation
-                if slope > 0:
-                    st.success(f"Your scores show an upward trend! Keep up the good work!")
+            try:
+                # Create a time series chart
+                history_df = pd.DataFrame(quiz_history)
+                history_df["date"] = history_df["end_time"]
+                history_df = history_df.sort_values("date")
+                
+                chart_data = pd.DataFrame({
+                    "Date": history_df["date"],
+                    "Score (%)": history_df["score_percentage"]
+                })
+                
+                st.line_chart(chart_data.set_index("Date")["Score (%)"])
+                
+                # Add linear trend line calculation
+                # Convert dates to numbers for linear regression
+                x = np.array(range(len(history_df)))
+                y = history_df["score_percentage"].values
+                
+                slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+                
+                if abs(r_value) > 0.3:  # Check if there's a meaningful correlation
+                    if slope > 0:
+                        st.success(f"Your scores show an upward trend! Keep up the good work!")
+                    else:
+                        st.warning(f"Your scores show a downward trend. Try reviewing topics where you scored lower.")
                 else:
-                    st.warning(f"Your scores show a downward trend. Try reviewing topics where you scored lower.")
-            else:
-                st.info("Your performance is relatively stable over time.")
-            
-            # Duration trend
-            st.subheader("Quiz Duration Over Time")
-            history_df["duration_minutes"] = history_df.apply(
-                lambda row: (row["end_time"] - row["start_time"]).total_seconds() / 60, 
-                axis=1
-            )
-            
-            duration_data = pd.DataFrame({
-                "Date": history_df["date"],
-                "Duration (minutes)": history_df["duration_minutes"].round(2)
-            })
-            
-            st.line_chart(duration_data.set_index("Date")["Duration (minutes)"])
+                    st.info("Your performance is relatively stable over time.")
+                
+                # Duration trend
+                st.subheader("Quiz Duration Over Time")
+                history_df["duration_minutes"] = history_df.apply(
+                    lambda row: (row.get("end_time", datetime.datetime.now()) - row.get("start_time", datetime.datetime.now())).total_seconds() / 60, 
+                    axis=1
+                )
+                
+                duration_data = pd.DataFrame({
+                    "Date": history_df["date"],
+                    "Duration (minutes)": history_df["duration_minutes"].round(2)
+                })
+                
+                st.line_chart(duration_data.set_index("Date")["Duration (minutes)"])
+            except Exception as e:
+                st.error(f"Error displaying progress trends: {e}")
         else:
             st.info("Take more quizzes to see your progress over time!")
     
@@ -1437,80 +1555,83 @@ def render_user_performance_stats():
         st.subheader("Performance by Topic")
         
         # Topic performance table
-        if "topic_stats" in user_stats and not user_stats["topic_stats"].empty:
+        if "topic_stats" in user_stats and hasattr(user_stats["topic_stats"], 'empty') and not user_stats["topic_stats"].empty:
             topic_stats = user_stats["topic_stats"]
             
-            # Allow sorting by different metrics
-            sort_column = st.selectbox(
-                "Sort topics by:", 
-                ["Average Score (%)", "Attempts", "Min Score (%)", "Max Score (%)", "Topic"],
-                index=0
-            )
-            
-            ascending = sort_column == "Topic"  # Alphabetical for topics, descending for metrics
-            sorted_topics = topic_stats.sort_values(sort_column, ascending=ascending)
-            
-            st.dataframe(sorted_topics, use_container_width=True)
-            
-            # Create a bar chart for topic performance
-            st.bar_chart(sorted_topics.set_index("Topic")["Average Score (%)"])
-            
-            # Show strengths and weaknesses
-            if len(topic_stats) >= 2:
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.subheader("Your Strengths")
-                    best_topics = topic_stats.nlargest(3, "Average Score (%)")
-                    for _, row in best_topics.iterrows():
-                        st.write(f"• {row['Topic']}: {row['Average Score (%)']:.1f}%")
-                
-                with col2:
-                    st.subheader("Areas to Improve")
-                    worst_topics = topic_stats.nsmallest(3, "Average Score (%)")
-                    for _, row in worst_topics.iterrows():
-                        st.write(f"• {row['Topic']}: {row['Average Score (%)']:.1f}%")
-                
-                # Add a section for topic-specific AI recommendations
-                st.subheader("Topic-Specific Recommendations")
-                
-                # Let the user select a topic for detailed recommendations
-                topic_for_analysis = st.selectbox(
-                    "Select a topic for detailed recommendations:", 
-                    topic_stats["Topic"].tolist(),
-                    index=0 if not topic_stats["Topic"].empty else None
+            try:
+                # Allow sorting by different metrics
+                sort_column = st.selectbox(
+                    "Sort topics by:", 
+                    ["Average Score (%)", "Attempts", "Min Score (%)", "Max Score (%)", "Topic"],
+                    index=0
                 )
                 
-                if topic_for_analysis:
-                    # Get the performance data for this topic
-                    topic_row = topic_stats[topic_stats["Topic"] == topic_for_analysis].iloc[0]
-                    topic_data = {
-                        "avg_score": topic_row["Average Score (%)"],
-                        "attempts": topic_row["Attempts"]
-                    }
+                ascending = sort_column == "Topic"  # Alphabetical for topics, descending for metrics
+                sorted_topics = topic_stats.sort_values(sort_column, ascending=ascending)
+                
+                st.dataframe(sorted_topics, use_container_width=True)
+                
+                # Create a bar chart for topic performance
+                st.bar_chart(sorted_topics.set_index("Topic")["Average Score (%)"])
+                
+                # Show strengths and weaknesses
+                if len(topic_stats) >= 2:
+                    col1, col2 = st.columns(2)
                     
-                    with st.spinner(f"Generating recommendations for {topic_for_analysis}..."):
-                        topic_recommendations = get_gemini_topic_recommendations(
-                            topic_for_analysis, 
-                            topic_data
-                        )
+                    with col1:
+                        st.subheader("Your Strengths")
+                        best_topics = topic_stats.nlargest(3, "Average Score (%)")
+                        for _, row in best_topics.iterrows():
+                            st.write(f"• {row['Topic']}: {row['Average Score (%)']:.1f}%")
                     
-                    if topic_recommendations.get("success", False):
-                        with st.expander(f"Learning strategies for {topic_for_analysis}", expanded=True):
-                            # Study strategies
-                            st.markdown("#### Study Strategies")
-                            for line in topic_recommendations.get("strategies", []):
-                                st.markdown(line)
-                            
-                            # Recommended resources
-                            st.markdown("#### Recommended Resources")
-                            for line in topic_recommendations.get("resources", []):
-                                st.markdown(line)
-                            
-                            # Practice approach
-                            st.markdown("#### Practice Approach")
-                            for line in topic_recommendations.get("practice", []):
-                                st.markdown(line)
+                    with col2:
+                        st.subheader("Areas to Improve")
+                        worst_topics = topic_stats.nsmallest(3, "Average Score (%)")
+                        for _, row in worst_topics.iterrows():
+                            st.write(f"• {row['Topic']}: {row['Average Score (%)']:.1f}%")
+                    
+                    # Add a section for topic-specific AI recommendations
+                    st.subheader("Topic-Specific Recommendations")
+                    
+                    # Let the user select a topic for detailed recommendations
+                    topic_for_analysis = st.selectbox(
+                        "Select a topic for detailed recommendations:", 
+                        topic_stats["Topic"].tolist(),
+                        index=0 if not topic_stats["Topic"].empty else None
+                    )
+                    
+                    if topic_for_analysis:
+                        # Get the performance data for this topic
+                        topic_row = topic_stats[topic_stats["Topic"] == topic_for_analysis].iloc[0]
+                        topic_data = {
+                            "avg_score": topic_row["Average Score (%)"],
+                            "attempts": topic_row["Attempts"]
+                        }
+                        
+                        with st.spinner(f"Generating recommendations for {topic_for_analysis}..."):
+                            topic_recommendations = get_gemini_topic_recommendations(
+                                topic_for_analysis, 
+                                topic_data
+                            )
+                        
+                        if topic_recommendations.get("success", False):
+                            with st.expander(f"Learning strategies for {topic_for_analysis}", expanded=True):
+                                # Study strategies
+                                st.markdown("#### Study Strategies")
+                                for line in topic_recommendations.get("strategies", []):
+                                    st.markdown(line)
+                                
+                                # Recommended resources
+                                st.markdown("#### Recommended Resources")
+                                for line in topic_recommendations.get("resources", []):
+                                    st.markdown(line)
+                                
+                                # Practice approach
+                                st.markdown("#### Practice Approach")
+                                for line in topic_recommendations.get("practice", []):
+                                    st.markdown(line)
+            except Exception as e:
+                st.error(f"Error displaying topic analysis: {e}")
         else:
             st.info("Take quizzes on different topics to see your comparative performance.")
     
@@ -1518,600 +1639,736 @@ def render_user_performance_stats():
     with stat_tabs[2]:
         st.subheader("Your Quiz Activity Patterns")
         
-        if "hour_activity" in user_stats and not user_stats["hour_activity"].empty:
-            # Time of day analysis
-            hour_activity = user_stats["hour_activity"]
-            hour_performance = user_stats["hour_performance"]
-            
-            # Merge activity and performance data
-            hour_merged = pd.merge(hour_activity, hour_performance, left_on="hour", right_on="Hour")
-            hour_merged["Hour"] = hour_merged["hour"].apply(lambda h: f"{h:02d}:00")
-            
-            # Format for display
-            st.subheader("Performance by Time of Day")
-            st.write("This shows when you take quizzes and how well you perform at different times:")
-            
-            # Use columns for better layout
-            if not hour_merged.empty:
-                # Find best time of day for quizzes
-                best_hour_idx = hour_merged["Average Score (%)"].idxmax()
-                best_hour = hour_merged.iloc[best_hour_idx]
+        if "hour_activity" in user_stats and hasattr(user_stats["hour_activity"], 'empty') and not user_stats["hour_activity"].empty:
+            try:
+                # Time of day analysis
+                hour_activity = user_stats["hour_activity"]
+                hour_performance = user_stats["hour_performance"]
                 
-                st.write(f"Your best performance is at **{best_hour['Hour']}** with an average score of **{best_hour['Average Score (%)']:.1f}%**")
+                # Merge activity and performance data
+                hour_merged = pd.merge(hour_activity, hour_performance, left_on="hour", right_on="Hour")
+                hour_merged["Hour"] = hour_merged["hour"].apply(lambda h: f"{h:02d}:00")
                 
-                # Create a visualization
-                hour_chart = pd.DataFrame({
-                    "Hour": hour_merged["Hour"],
-                    "Score (%)": hour_merged["Average Score (%)"],
-                    "Quizzes Taken": hour_merged["count"]
-                })
+                # Format for display
+                st.subheader("Performance by Time of Day")
+                st.write("This shows when you take quizzes and how well you perform at different times:")
                 
-                st.bar_chart(hour_chart.set_index("Hour")["Score (%)"])
-                st.bar_chart(hour_chart.set_index("Hour")["Quizzes Taken"])
-            
-            # Day of week analysis if available
-            if "day_performance" in user_stats and not user_stats["day_performance"].empty:
-                day_activity = user_stats["day_activity"]
-                day_performance = user_stats["day_performance"]
-                
-                # Merge activity and performance
-                day_merged = pd.merge(
-                    day_activity, 
-                    day_performance,
-                    left_on=["day_of_week", "day_name"],
-                    right_on=["day_of_week", "Day"]
-                )
-                
-                st.subheader("Performance by Day of Week")
-                
-                if not day_merged.empty:
-                    # Find best day of week
-                    best_day_idx = day_merged["Average Score (%)"].idxmax()
-                    best_day = day_merged.iloc[best_day_idx]
+                # Use columns for better layout
+                if not hour_merged.empty:
+                    # Find best time of day for quizzes
+                    best_hour_idx = hour_merged["Average Score (%)"].idxmax()
+                    best_hour = hour_merged.iloc[best_hour_idx]
                     
-                    st.write(f"Your best performance is on **{best_day['Day']}** with an average score of **{best_day['Average Score (%)']:.1f}%**")
+                    st.write(f"Your best performance is at **{best_hour['Hour']}** with an average score of **{best_hour['Average Score (%)']:.1f}%**")
                     
-                    # Create visualization
-                    day_chart = pd.DataFrame({
-                        "Day": day_merged["Day"],
-                        "Score (%)": day_merged["Average Score (%)"],
-                        "Quizzes Taken": day_merged["count"]
+                    # Create a visualization
+                    hour_chart = pd.DataFrame({
+                        "Hour": hour_merged["Hour"],
+                        "Score (%)": hour_merged["Average Score (%)"],
+                        "Quizzes Taken": hour_merged["count"]
                     })
                     
-                    # Ensure proper day ordering
-                    day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-                    day_chart["Day"] = pd.Categorical(day_chart["Day"], categories=day_order, ordered=True)
-                    day_chart = day_chart.sort_values("Day")
-                    
-                    st.bar_chart(day_chart.set_index("Day")["Score (%)"])
-                    st.bar_chart(day_chart.set_index("Day")["Quizzes Taken"])
-            
-            # Quiz speed analysis
-            if "avg_questions_per_minute" in user_stats:
-                st.subheader("Quiz Speed Analysis")
-                speed = user_stats["avg_questions_per_minute"]
-                duration = user_stats["avg_duration"]
+                    st.bar_chart(hour_chart.set_index("Hour")["Score (%)"])
+                    st.bar_chart(hour_chart.set_index("Hour")["Quizzes Taken"])
                 
-                st.write(f"On average, you spend **{duration/60:.1f} minutes** per quiz")
-                st.write(f"You answer approximately **{speed:.2f} questions per minute**")
+                # Day of week analysis if available
+                if "day_performance" in user_stats and hasattr(user_stats["day_performance"], 'empty') and not user_stats["day_performance"].empty:
+                    day_activity = user_stats["day_activity"]
+                    day_performance = user_stats["day_performance"]
+                    
+                    # Merge activity and performance
+                    day_merged = pd.merge(
+                        day_activity, 
+                        day_performance,
+                        left_on=["day_of_week", "day_name"],
+                        right_on=["day_of_week", "Day"]
+                    )
+                    
+                    st.subheader("Performance by Day of Week")
+                    
+                    if not day_merged.empty:
+                        # Find best day of week
+                        best_day_idx = day_merged["Average Score (%)"].idxmax()
+                        best_day = day_merged.iloc[best_day_idx]
+                        
+                        st.write(f"Your best performance is on **{best_day['Day']}** with an average score of **{best_day['Average Score (%)']:.1f}%**")
+                        
+                        # Create visualization
+                        day_chart = pd.DataFrame({
+                            "Day": day_merged["Day"],
+                            "Score (%)": day_merged["Average Score (%)"],
+                            "Quizzes Taken": day_merged["count"]
+                        })
+                        
+                        # Ensure proper day ordering
+                        day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                        day_chart["Day"] = pd.Categorical(day_chart["Day"], categories=day_order, ordered=True)
+                        day_chart = day_chart.sort_values("Day")
+                        
+                        st.bar_chart(day_chart.set_index("Day")["Score (%)"])
+                        st.bar_chart(day_chart.set_index("Day")["Quizzes Taken"])
                 
-                # Correlation between speed and score
-                history_df = pd.DataFrame(user_stats["quizzes"])
-                if not history_df.empty and len(history_df) > 3:
-                    history_df["duration"] = (history_df["end_time"] - history_df["start_time"]).dt.total_seconds()
-                    history_df["questions_per_minute"] = history_df["total_questions"] / (history_df["duration"] / 60)
+                # Quiz speed analysis
+                if "avg_questions_per_minute" in user_stats:
+                    st.subheader("Quiz Speed Analysis")
+                    speed = user_stats.get("avg_questions_per_minute", 0)
+                    duration = user_stats.get("avg_duration", 0)
                     
-                    # Calculate correlation
-                    correlation = history_df["questions_per_minute"].corr(history_df["score_percentage"])
+                    st.write(f"On average, you spend **{duration/60:.1f} minutes** per quiz")
+                    st.write(f"You answer approximately **{speed:.2f} questions per minute**")
                     
-                    if abs(correlation) > 0.3:  # Check if correlation is meaningful
-                        if correlation > 0:
-                            st.success(f"You tend to perform better when answering questions more quickly.")
+                    # Correlation between speed and score
+                    history_df = pd.DataFrame(user_stats.get("quizzes", []))
+                    if not history_df.empty and len(history_df) > 3:
+                        history_df["duration"] = (history_df["end_time"] - history_df["start_time"]).dt.total_seconds()
+                        history_df["questions_per_minute"] = history_df["total_questions"] / (history_df["duration"] / 60)
+                        
+                        # Calculate correlation
+                        correlation = history_df["questions_per_minute"].corr(history_df["score_percentage"])
+                        
+                        if abs(correlation) > 0.3:  # Check if correlation is meaningful
+                            if correlation > 0:
+                                st.success(f"You tend to perform better when answering questions more quickly.")
+                            else:
+                                st.info(f"You tend to perform better when taking more time with questions.")
                         else:
-                            st.info(f"You tend to perform better when taking more time with questions.")
-                    else:
-                        st.write("There's no strong relationship between your quiz speed and performance.")
+                            st.write("There's no strong relationship between your quiz speed and performance.")
+            except Exception as e:
+                st.error(f"Error displaying activity patterns: {e}")
         else:
             st.info("Take more quizzes to see your activity patterns!")
     
-    # Quiz History Tab
+    # Quiz History Tab - FIXED VERSION USING TABS INSTEAD OF NESTED EXPANDERS
     with stat_tabs[3]:
         st.subheader("Quiz History")
         
-        quiz_history = user_stats["quizzes"]
+        quiz_history = user_stats.get("quizzes", [])
         
         if quiz_history:
-            # Create a dataframe for better display
-            history_df = pd.DataFrame([
-                {
-                    "Date": q["end_time"].strftime("%Y-%m-%d %H:%M"),
-                    "Topic": q["topic"],
-                    "Score": f"{q['score']}/{q['total_questions']} ({q['score_percentage']:.1f}%)",
-                    "Duration": f"{(q['end_time'] - q['start_time']).seconds // 60}m {(q['end_time'] - q['start_time']).seconds % 60}s",
-                    "ID": str(q["_id"])
-                }
-                for q in quiz_history
-            ])
-            
-            st.dataframe(history_df[["Date", "Topic", "Score", "Duration"]], use_container_width=True)
-            
-            # Quiz details expander
-            with st.expander("View Quiz Details"):
-                quiz_id = st.selectbox("Select quiz to view:", 
-                                       options=history_df["ID"].tolist(),
-                                       format_func=lambda x: f"{history_df[history_df['ID']==x]['Topic'].values[0]} - {history_df[history_df['ID']==x]['Date'].values[0]}")
+            try:
+                # Create a dataframe for better display
+                history_df = pd.DataFrame([
+                    {
+                        "Date": q.get("end_time", datetime.datetime.now()).strftime("%Y-%m-%d %H:%M"),
+                        "Topic": q.get("topic", "Unknown"),
+                        "Score": f"{q.get('score', 0)}/{q.get('total_questions', 0)} ({q.get('score_percentage', 0):.1f}%)",
+                        "Duration": f"{(q.get('end_time', datetime.datetime.now()) - q.get('start_time', datetime.datetime.now())).seconds // 60}m {(q.get('end_time', datetime.datetime.now()) - q.get('start_time', datetime.datetime.now())).seconds % 60}s",
+                        "ID": str(q.get("_id", ""))
+                    }
+                    for q in quiz_history
+                ])
                 
-                if quiz_id:
+                st.dataframe(history_df[["Date", "Topic", "Score", "Duration"]], use_container_width=True)
+                
+                # Quiz details section with tabs instead of nested expanders
+                selected_quiz_id = st.selectbox(
+                    "Select quiz to view details:", 
+                    options=history_df["ID"].tolist(),
+                    format_func=lambda x: f"{history_df[history_df['ID']==x]['Topic'].values[0]} - {history_df[history_df['ID']==x]['Date'].values[0]}",
+                    key="quiz_history_selector"
+                )
+                
+                if selected_quiz_id:
                     # Find selected quiz
-                    selected_quiz = next((q for q in quiz_history if str(q["_id"]) == quiz_id), None)
+                    selected_quiz = next((q for q in quiz_history if str(q.get("_id", "")) == selected_quiz_id), None)
                     
                     if selected_quiz:
-                        st.subheader(f"Quiz Details: {selected_quiz['topic']}")
-                        st.write(f"Date: {selected_quiz['end_time'].strftime('%Y-%m-%d %H:%M')}")
-                        st.write(f"Duration: {(selected_quiz['end_time'] - selected_quiz['start_time']).seconds // 60} min {(selected_quiz['end_time'] - selected_quiz['start_time']).seconds % 60} sec")
-                        st.write(f"Score: {selected_quiz['score']}/{selected_quiz['total_questions']} ({selected_quiz['score_percentage']:.1f}%)")
+                        st.subheader(f"Quiz Details: {selected_quiz.get('topic', 'Unknown')}")
+                        st.write(f"Date: {selected_quiz.get('end_time', datetime.datetime.now()).strftime('%Y-%m-%d %H:%M')}")
+                        st.write(f"Duration: {(selected_quiz.get('end_time', datetime.datetime.now()) - selected_quiz.get('start_time', datetime.datetime.now())).seconds // 60} min {(selected_quiz.get('end_time', datetime.datetime.now()) - selected_quiz.get('start_time', datetime.datetime.now())).seconds % 60} sec")
+                        st.write(f"Score: {selected_quiz.get('score', 0)}/{selected_quiz.get('total_questions', 0)} ({selected_quiz.get('score_percentage', 0):.1f}%)")
                         
                         try:
                             # Get the actual questions
-                            questions = get_questions_by_topic(selected_quiz['topic'])
+                            questions = get_questions_by_topic(selected_quiz.get('topic', ''))
                             
                             # Create a mapping of question IDs to questions
-                            question_map = {str(q["_id"]): q for q in questions}
+                            question_map = {str(q.get("_id", "")): q for q in questions if validate_question(q)}
                             
-                            # Display the questions and user's answers
-                            for i, (question_id, user_answer) in enumerate(selected_quiz['user_answers'].items()):
-                                if question_id in question_map:
-                                    question = question_map[question_id]
-                                    
-                                    with st.expander(f"Question {i+1}: {question['question']}"):
-                                        for opt in question['options']:
-                                            if opt['letter'] == question['correct_option'] and opt['letter'] == user_answer:
-                                                st.markdown(f"- {opt['letter']}) {opt['text']} ✓ **(Your Answer - Correct)**")
-                                            elif opt['letter'] == question['correct_option']:
-                                                st.markdown(f"- {opt['letter']}) {opt['text']} ✓ **(Correct Answer)**")
-                                            elif opt['letter'] == user_answer:
-                                                st.markdown(f"- {opt['letter']}) {opt['text']} ❌ **(Your Answer)**")
-                                            else:
-                                                st.markdown(f"- {opt['letter']}) {opt['text']}")
+                            if 'user_answers' in selected_quiz and selected_quiz['user_answers']:
+                                # Use tabs instead of nested expanders
+                                st.write("### Quiz Questions")
+                                question_tabs = st.tabs([f"Question {i+1}" for i in range(len(selected_quiz.get('user_answers', {})))])
+                                
+                                # Populate each tab with question details
+                                for i, (tab, (question_id, user_answer)) in enumerate(zip(question_tabs, selected_quiz.get('user_answers', {}).items())):
+                                    if question_id in question_map:
+                                        question = question_map[question_id]
+                                        
+                                        with tab:
+                                            st.markdown(f"**{question.get('question', 'Question text missing')}**")
+                                            
+                                            for opt in question.get('options', []):
+                                                if opt.get('letter', '') == question.get('correct_option', '') and opt.get('letter', '') == user_answer:
+                                                    st.markdown(f"- {opt.get('letter', '')}) {opt.get('text', '')} ✓ **(Your Answer - Correct)**")
+                                                elif opt.get('letter', '') == question.get('correct_option', ''):
+                                                    st.markdown(f"- {opt.get('letter', '')}) {opt.get('text', '')} ✓ **(Correct Answer)**")
+                                                elif opt.get('letter', '') == user_answer:
+                                                    st.markdown(f"- {opt.get('letter', '')}) {opt.get('text', '')} ❌ **(Your Answer)**")
+                                                else:
+                                                    st.markdown(f"- {opt.get('letter', '')}) {opt.get('text', '')}")
                         except Exception as e:
                             st.error(f"Error displaying quiz details: {e}")
+            except Exception as e:
+                st.error(f"Error displaying quiz history: {e}")
         else:
             st.info("You haven't taken any quizzes yet.")
 
 # ====================== MAIN APPLICATION ======================
 def main():
-    # Custom CSS
-    st.markdown("""
-    <style>
-    .logo-img {
-        width: 50px;
-        height: 50px;
-        margin-right: 10px;
-        vertical-align: middle;
-    }
-    .app-header {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        margin-bottom: 30px;
-    }
-    .stButton>button {
-        width: 100%;
-    }
-    .question-number {
-        font-weight: bold;
-        margin-right: 5px;
-    }
-    .correct-answer {
-        color: green;
-        font-weight: bold;
-    }
-    .user-answer-correct {
-        color: green;
-        font-weight: bold;
-    }
-    .user-answer-incorrect {
-        color: red;
-        font-weight: bold;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    try:
+        # Custom CSS
+        st.markdown("""
+        <style>
+        .logo-img {
+            width: 50px;
+            height: 50px;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        .app-header {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 30px;
+        }
+        .stButton>button {
+            width: 100%;
+        }
+        .question-number {
+            font-weight: bold;
+            margin-right: 5px;
+        }
+        .correct-answer {
+            color: green;
+            font-weight: bold;
+        }
+        .user-answer-correct {
+            color: green;
+            font-weight: bold;
+        }
+        .user-answer-incorrect {
+            color: red;
+            font-weight: bold;
+        }
+        </style>
+        """, unsafe_allow_html=True)
 
-    # Header with logo
-    st.markdown("""
-    <div class="app-header">
-        <img src="https://cdn-icons-png.flaticon.com/512/4616/4616271.png" class="logo-img"/>
-        <h1>AI-Powered Quiz Application</h1>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Sidebar Navigation
-    with st.sidebar:
-        if st.session_state.logged_in:
-            st.write(f"Logged in as: **{st.session_state.username}** ({st.session_state.role})")
+        # Header with logo
+        st.markdown("""
+        <div class="app-header">
+            <img src="https://cdn-icons-png.flaticon.com/512/4616/4616271.png" class="logo-img"/>
+            <h1>AI-Powered Quiz Application</h1>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Sidebar Navigation
+        with st.sidebar:
+            if st.session_state.logged_in:
+                st.write(f"Logged in as: **{st.session_state.username}** ({st.session_state.role})")
+                
+                if st.button("📤 Logout"):
+                    logout()
+            else:
+                st.subheader("Authentication")
+                auth_option = st.radio("Select option:", ["Login", "Register"])
+                
+                if auth_option == "Login":
+                    with st.form("login_form"):
+                        username = st.text_input("Username")
+                        password = st.text_input("Password", type="password")
+                        submit_button = st.form_submit_button("Login")
+                        
+                        if submit_button:
+                            if username and password:
+                                success, user = login_user(username, password)
+                                if success:
+                                    st.session_state.logged_in = True
+                                    st.session_state.user_id = str(user.get("_id", ""))
+                                    st.session_state.username = user.get("username", "")
+                                    st.session_state.role = user.get("role", "")
+                                    st.rerun()
+                                else:
+                                    st.error("Invalid username or password")
+                            else:
+                                st.error("Please enter both username and password")
+                
+                else:  # Register
+                    with st.form("register_form"):
+                        username = st.text_input("Username")
+                        password = st.text_input("Password", type="password")
+                        confirm_password = st.text_input("Confirm Password", type="password")
+                        role = st.selectbox("Role", ["User", "Admin"])
+                        submit_button = st.form_submit_button("Register")
+                        
+                        if submit_button:
+                            if username and password and confirm_password:
+                                if password != confirm_password:
+                                    st.error("Passwords do not match")
+                                else:
+                                    success, message = register_user(username, password, role)
+                                    if success:
+                                        st.success(message)
+                                    else:
+                                        st.error(message)
+                            else:
+                                st.error("Please fill all the fields")
+        
+        # Main Content
+        if not st.session_state.logged_in:
+            st.info("Please login or register to continue")
             
-            if st.button("📤 Logout"):
-                logout()
+            # App description
+            st.markdown("""
+            ## Welcome to the AI-Powered Quiz Application!
+            
+            This application provides an interactive quiz experience, with questions generated and explained by AI.
+            
+            ### Features:
+            - **For Admins**: Create custom quizzes on any topic using AI
+            - **For Users**: Take quizzes and get AI-powered explanations
+            - **Track your progress**: View your quiz history and performance
+            - **Get AI Insights**: Receive personalized recommendations and analysis
+            
+            Get started by logging in or registering a new account.
+            """)
+            
         else:
-            st.subheader("Authentication")
-            auth_option = st.radio("Select option:", ["Login", "Register"])
-            
-            if auth_option == "Login":
-                with st.form("login_form"):
-                    username = st.text_input("Username")
-                    password = st.text_input("Password", type="password")
-                    submit_button = st.form_submit_button("Login")
+            # Admin View
+            if st.session_state.role == "Admin":
+                admin_tabs = st.tabs(["Create Quiz", "Manage Questions", "Quiz Stats"])
+                
+                # Create Quiz Tab
+                with admin_tabs[0]:
+                    st.header("Create New Quiz Questions")
                     
-                    if submit_button:
-                        if username and password:
-                            success, user = login_user(username, password)
-                            if success:
-                                st.session_state.logged_in = True
-                                st.session_state.user_id = str(user["_id"])
-                                st.session_state.username = user["username"]
-                                st.session_state.role = user["role"]
-                                st.rerun()
-                            else:
-                                st.error("Invalid username or password")
-                        else:
-                            st.error("Please enter both username and password")
-            
-            else:  # Register
-                with st.form("register_form"):
-                    username = st.text_input("Username")
-                    password = st.text_input("Password", type="password")
-                    confirm_password = st.text_input("Confirm Password", type="password")
-                    role = st.selectbox("Role", ["User", "Admin"])
-                    submit_button = st.form_submit_button("Register")
+                    col1, col2 = st.columns([1, 1])
                     
-                    if submit_button:
-                        if username and password and confirm_password:
-                            if password != confirm_password:
-                                st.error("Passwords do not match")
-                            else:
-                                success, message = register_user(username, password, role)
+                    with col1:
+                        with st.form("generate_questions_form"):
+                            topic = st.text_input("Quiz Topic (e.g., Photosynthesis, World War II)")
+                            prompt = st.text_area("Prompt for Gemini", 
+                                              value="Generate 5 MCQs on the topic with 4 options each and mark the correct one with an asterisk (*). Format each question as:\n\n1. Question\na) Option 1\nb) Option 2\nc) Option 3*\nd) Option 4")
+                            num_questions = st.slider("Number of Questions", min_value=1, max_value=10, value=5)
+                            
+                            submit = st.form_submit_button("Generate Questions")
+                            
+                            if submit and topic and prompt:
+                                with st.spinner("Generating questions with AI..."):
+                                    # Customize prompt with specific instructions
+                                    full_prompt = f"Topic: {topic}\n\n{prompt}\n\nCreate {num_questions} multiple choice questions. For each question, CLEARLY mark the correct answer with an asterisk (*) or explicitly state which option is correct."
+                                    response = call_gemini_api(full_prompt)
+                                    
+                                    if response:
+                                        questions = parse_mcq_response(response)
+                                        if questions:
+                                            st.session_state.generated_questions = questions
+                                            st.session_state.current_topic = topic
+                                            st.success(f"Generated {len(questions)} questions successfully")
+                                        else:
+                                            st.error("Failed to parse questions from the response. Please try again with a clearer prompt.")
+                                    else:
+                                        st.error("Failed to generate questions. Please try again later.")
+                    
+                    with col2:
+                        if 'generated_questions' in st.session_state and 'current_topic' in st.session_state:
+                            st.subheader(f"Preview: {st.session_state.current_topic} Quiz")
+                            
+                            # Display generated questions
+                            for i, q in enumerate(st.session_state.generated_questions):
+                                try:
+                                    st.markdown(f"**Q{i+1}: {q.get('question', 'Question text missing')}**")
+                                    
+                                    for opt in q.get('options', []):
+                                        if opt.get('letter', '') == q.get('correct_option', ''):
+                                            st.markdown(f"- {opt.get('letter', '')}) {opt.get('text', '')} ✓")
+                                        else:
+                                            st.markdown(f"- {opt.get('letter', '')}) {opt.get('text', '')}")
+                                except Exception as e:
+                                    st.error(f"Error displaying question {i+1}: {e}")
+                                
+                                st.markdown("---")
+                            
+                            if st.button("Save Questions to Database"):
+                                success, message = save_questions_to_db(
+                                    st.session_state.current_topic, 
+                                    st.session_state.generated_questions
+                                )
                                 if success:
                                     st.success(message)
-                                else:
-                                    st.error(message)
-                        else:
-                            st.error("Please fill all the fields")
-    
-    # Main Content
-    if not st.session_state.logged_in:
-        st.info("Please login or register to continue")
-        
-        # App description
-        st.markdown("""
-        ## Welcome to the AI-Powered Quiz Application!
-        
-        This application provides an interactive quiz experience, with questions generated and explained by AI.
-        
-        ### Features:
-        - **For Admins**: Create custom quizzes on any topic using AI
-        - **For Users**: Take quizzes and get AI-powered explanations
-        - **Track your progress**: View your quiz history and performance
-        - **Get AI Insights**: Receive personalized recommendations and analysis
-        
-        Get started by logging in or registering a new account.
-        """)
-        
-    else:
-        # Admin View
-        if st.session_state.role == "Admin":
-            admin_tabs = st.tabs(["Create Quiz", "Manage Questions", "Quiz Stats"])
-            
-            # Create Quiz Tab
-            with admin_tabs[0]:
-                st.header("Create New Quiz Questions")
-                
-                col1, col2 = st.columns([1, 1])
-                
-                with col1:
-                    with st.form("generate_questions_form"):
-                        topic = st.text_input("Quiz Topic (e.g., Photosynthesis, World War II)")
-                        prompt = st.text_area("Prompt for Gemini", 
-                                          value="Generate 5 MCQs on the topic with 4 options each and mark the correct one with an asterisk (*). Format each question as:\n\n1. Question\na) Option 1\nb) Option 2\nc) Option 3*\nd) Option 4")
-                        num_questions = st.slider("Number of Questions", min_value=1, max_value=10, value=5)
-                        
-                        submit = st.form_submit_button("Generate Questions")
-                        
-                        if submit and topic and prompt:
-                            with st.spinner("Generating questions with AI..."):
-                                # Customize prompt with specific instructions
-                                full_prompt = f"Topic: {topic}\n\n{prompt}\n\nCreate {num_questions} multiple choice questions. For each question, CLEARLY mark the correct answer with an asterisk (*) or explicitly state which option is correct."
-                                response = call_gemini_api(full_prompt)
-                                
-                                if response:
-                                    questions = parse_mcq_response(response)
-                                    if questions:
-                                        st.session_state.generated_questions = questions
-                                        st.session_state.current_topic = topic
-                                        st.success(f"Generated {len(questions)} questions successfully")
-                                    else:
-                                        st.error("Failed to parse questions from the response. Please try again with a clearer prompt.")
-                                else:
-                                    st.error("Failed to generate questions. Please try again later.")
-                
-                with col2:
-                    if 'generated_questions' in st.session_state and 'current_topic' in st.session_state:
-                        st.subheader(f"Preview: {st.session_state.current_topic} Quiz")
-                        
-                        # Display generated questions
-                        for i, q in enumerate(st.session_state.generated_questions):
-                            st.markdown(f"**Q{i+1}: {q['question']}**")
-                            
-                            for opt in q['options']:
-                                if opt['letter'] == q['correct_option']:
-                                    st.markdown(f"- {opt['letter']}) {opt['text']} ✓")
-                                else:
-                                    st.markdown(f"- {opt['letter']}) {opt['text']}")
-                            
-                            st.markdown("---")
-                        
-                        if st.button("Save Questions to Database"):
-                            success, message = save_questions_to_db(
-                                st.session_state.current_topic, 
-                                st.session_state.generated_questions
-                            )
-                            if success:
-                                st.success(message)
-                                # Clear the session state
-                                del st.session_state.generated_questions
-                                del st.session_state.current_topic
-                                # Clear cache to refresh topics
-                                st.cache_data.clear()
-                                st.rerun()
-                            else:
-                                st.error(message)
-            
-            # Manage Questions Tab
-            with admin_tabs[1]:
-                st.header("Manage Existing Questions")
-                
-                topics = get_topics()
-                if topics:
-                    selected_topic = st.selectbox("Select Topic", topics)
-                    
-                    # Add a refresh button
-                    if st.button("Refresh Questions"):
-                        st.cache_data.clear()
-                        st.rerun()
-                    
-                    questions = get_questions_by_topic(selected_topic)
-                    
-                    if questions:
-                        for i, q in enumerate(questions):
-                            st.markdown(f"**Q{i+1}: {q['question']}**")
-                            
-                            col1, col2 = st.columns([3, 1])
-                            
-                            with col1:
-                                for opt in q['options']:
-                                    if opt['letter'] == q['correct_option']:
-                                        st.markdown(f"- {opt['letter']}) {opt['text']} ✓")
-                                    else:
-                                        st.markdown(f"- {opt['letter']}) {opt['text']}")
-                            
-                            with col2:
-                                col_edit, col_delete = st.columns(2)
-                                with col_edit:
-                                    if st.button("Edit", key=f"edit_{q['_id']}"):
-                                        st.session_state.selected_question_id = str(q['_id'])
-                                        st.session_state.editing_question = True
-                                
-                                with col_delete:
-                                    if st.button("Delete", key=f"delete_{q['_id']}"):
-                                        success, message = delete_question(q['_id'])
-                                        if success:
-                                            st.success(message)
-                                            # Clear cache to refresh questions
-                                            st.cache_data.clear()
-                                            st.rerun()
-                                        else:
-                                            st.error(message)
-                            
-                            st.markdown("---")
-                        
-                        # Edit question form
-                        if 'selected_question_id' in st.session_state and st.session_state.selected_question_id and 'editing_question' in st.session_state and st.session_state.editing_question:
-                            st.subheader("Edit Question")
-                            
-                            # Find the question
-                            question_id = st.session_state.selected_question_id
-                            question = questions_collection.find_one({"_id": ObjectId(question_id)})
-                            
-                            if question:
-                                with st.form("edit_question_form"):
-                                    q_text = st.text_area("Question", value=question['question'])
-                                    
-                                    options = []
-                                    correct_option = question['correct_option']
-                                    
-                                    for opt in question['options']:
-                                        col1, col2, col3 = st.columns([1, 3, 1])
-                                        
-                                        with col1:
-                                            letter = st.text_input("Letter", value=opt['letter'], key=f"letter_{opt['letter']}")
-                                        
-                                        with col2:
-                                            text = st.text_input("Text", value=opt['text'], key=f"text_{opt['letter']}")
-                                        
-                                        with col3:
-                                            is_correct = st.checkbox("Correct", value=(opt['letter'] == correct_option), key=f"correct_{opt['letter']}")
-                                            if is_correct:
-                                                correct_option = letter
-                                        
-                                        options.append({"letter": letter, "text": text})
-                                    
-                                    if st.form_submit_button("Update Question"):
-                                        success, message = update_question(question_id, q_text, options, correct_option)
-                                        if success:
-                                            st.success(message)
-                                            st.session_state.editing_question = False
-                                            st.session_state.selected_question_id = None
-                                            # Clear cache to refresh questions
-                                            st.cache_data.clear()
-                                            st.rerun()
-                                        else:
-                                            st.error(message)
-                            
-                            if st.button("Cancel Editing"):
-                                st.session_state.editing_question = False
-                                st.session_state.selected_question_id = None
-                                st.rerun()
-                    else:
-                        st.info(f"No questions found for topic: {selected_topic}")
-                else:
-                    st.info("No quiz topics found. Create questions first.")
-            
-            # Quiz Stats Tab - Using the new enhanced stats with Gemini analysis
-            with admin_tabs[2]:
-                render_admin_quiz_stats()
-        
-        # User View
-        else:  # User role
-            user_tabs = st.tabs(["Available Quizzes", "Take Quiz", "My Performance"])
-            
-            # Available Quizzes Tab
-            with user_tabs[0]:
-                st.header("Available Quiz Topics")
-                
-                topics = get_topics()
-                
-                if topics:
-                    for topic in topics:
-                        questions = get_questions_by_topic(topic)
-                        
-                        col1, col2 = st.columns([3, 1])
-                        with col1:
-                            st.markdown(f"**{topic}**")
-                            st.write(f"Questions available: {len(questions)}")
-                        
-                        with col2:
-                            if st.button("Start Quiz", key=f"start_{topic}"):
-                                success, message = start_quiz(topic)
-                                if success:
-                                    st.session_state.active_tab = "Take Quiz"
+                                    # Clear the session state
+                                    del st.session_state.generated_questions
+                                    del st.session_state.current_topic
+                                    # Clear cache to refresh topics
+                                    st.cache_data.clear()
                                     st.rerun()
                                 else:
                                     st.error(message)
-                        
-                        st.markdown("---")
-                else:
-                    st.info("No quizzes available yet. Please check back later.")
-            
-            # Take Quiz Tab
-            with user_tabs[1]:
-                if st.session_state.current_quiz:
-                    topic = st.session_state.current_quiz["topic"]
-                    questions = st.session_state.current_quiz["questions"]
+                
+                # Manage Questions Tab
+                with admin_tabs[1]:
+                    st.header("Manage Existing Questions")
                     
-                    st.header(f"Quiz: {topic}")
-                    
-                    # Display timer
-                    start_time = st.session_state.current_quiz["start_time"]
-                    elapsed = datetime.datetime.now() - start_time
-                    st.write(f"Time elapsed: {elapsed.seconds // 60} min {elapsed.seconds % 60} sec")
-                    
-                    # Display quiz score if submitted
-                    if st.session_state.quiz_score:
-                        score = st.session_state.quiz_score
-                        st.success(f"Quiz completed! Your score: {score['score']}/{score['total']} ({score['percentage']:.1f}%)")
+                    topics = get_topics()
+                    if topics:
+                        selected_topic = st.selectbox("Select Topic", topics)
                         
-                        if not st.session_state.show_explanations:
-                            if st.button("Show Explanations"):
-                                st.session_state.show_explanations = True
-                                st.rerun()
-                    
-                    # Display questions
-                    for i, question in enumerate(questions):
-                        question_id = str(question["_id"])
-                        
-                        st.markdown(f"**Question {i+1}: {question['question']}**")
-                        
-                        # If quiz not submitted, show options for selection
-                        if not st.session_state.quiz_score:
-                            options = {opt["letter"]: opt["text"] for opt in question["options"]}
-                            selected_option = st.radio(
-                                "Select your answer:",
-                                options.keys(),
-                                format_func=lambda x: f"{x}) {options[x]}",
-                                key=f"q_{question_id}"
-                            )
-                            
-                            # Save the answer to session state
-                            st.session_state.user_answers[question_id] = selected_option
-                        
-                        # If quiz submitted and explanations requested, show results and explanations
-                        elif st.session_state.show_explanations:
-                            user_answer = st.session_state.user_answers.get(question_id, None)
-                            correct_answer = question["correct_option"]
-                            
-                            for opt in question["options"]:
-                                if opt["letter"] == correct_answer:
-                                    st.markdown(f"- {opt['letter']}) {opt['text']} ✓ **(Correct Answer)**")
-                                elif opt["letter"] == user_answer:
-                                    if user_answer != correct_answer:
-                                        st.markdown(f"- {opt['letter']}) {opt['text']} ❌ **(Your Answer)**")
-                                    else:
-                                        st.markdown(f"- {opt['letter']}) {opt['text']} ✓ **(Your Answer)**")
-                                else:
-                                    st.markdown(f"- {opt['letter']}) {opt['text']}")
-                            
-                            # Show explanation
-                            with st.expander("Show Explanation"):
-                                with st.spinner("Generating explanation..."):
-                                    # Map option letters to full text
-                                    options_dict = {opt["letter"]: opt["text"] for opt in question["options"]}
-                                    user_answer_text = options_dict.get(user_answer, "No answer provided")
-                                    correct_answer_text = options_dict.get(correct_answer, "")
-                                    
-                                    explanation = get_explanation(
-                                        question["question"], 
-                                        f"{user_answer}) {user_answer_text}", 
-                                        f"{correct_answer}) {correct_answer_text}"
-                                    )
-                                    st.markdown(explanation)
-                        
-                        st.markdown("---")
-                    
-                    # Submit button (only show if quiz not submitted)
-                    if not st.session_state.quiz_score:
-                        if st.button("Submit Quiz"):
-                            success, message = submit_quiz()
-                            if success:
-                                st.success(message)
-                                st.rerun()
-                            else:
-                                st.error(message)
-                    
-                    # Start new quiz button (only show if quiz submitted)
-                    if st.session_state.quiz_score:
-                        if st.button("Start New Quiz"):
-                            st.session_state.current_quiz = None
-                            st.session_state.user_answers = {}
-                            st.session_state.quiz_score = None
-                            st.session_state.show_explanations = False
-                            st.session_state.active_tab = "Available Quizzes"
+                        # Add a refresh button
+                        if st.button("Refresh Questions"):
+                            st.cache_data.clear()
                             st.rerun()
-                else:
-                    st.info("No active quiz. Please select a quiz from the Available Quizzes tab.")
+                        
+                        questions = get_questions_by_topic(selected_topic)
+                        
+                        if questions:
+                            for i, q in enumerate(questions):
+                                try:
+                                    st.markdown(f"**Q{i+1}: {q.get('question', 'Question text missing')}**")
+                                    
+                                    col1, col2 = st.columns([3, 1])
+                                    
+                                    with col1:
+                                        for opt in q.get('options', []):
+                                            if opt.get('letter', '') == q.get('correct_option', ''):
+                                                st.markdown(f"- {opt.get('letter', '')}) {opt.get('text', '')} ✓")
+                                            else:
+                                                st.markdown(f"- {opt.get('letter', '')}) {opt.get('text', '')}")
+                                    
+                                    with col2:
+                                        col_edit, col_delete = st.columns(2)
+                                        with col_edit:
+                                            if st.button("Edit", key=f"edit_{q.get('_id', '')}"):
+                                                st.session_state.selected_question_id = str(q.get('_id', ''))
+                                                st.session_state.editing_question = True
+                                        
+                                        with col_delete:
+                                            if st.button("Delete", key=f"delete_{q.get('_id', '')}"):
+                                                success, message = delete_question(q.get('_id', ''))
+                                                if success:
+                                                    st.success(message)
+                                                    # Clear cache to refresh questions
+                                                    st.cache_data.clear()
+                                                    st.rerun()
+                                                else:
+                                                    st.error(message)
+                                except Exception as e:
+                                    st.error(f"Error displaying question {i+1}: {e}")
+                                
+                                st.markdown("---")
+                            
+                            # Edit question form
+                            if 'selected_question_id' in st.session_state and st.session_state.selected_question_id and 'editing_question' in st.session_state and st.session_state.editing_question:
+                                st.subheader("Edit Question")
+                                
+                                # Find the question
+                                question_id = st.session_state.selected_question_id
+                                question = questions_collection.find_one({"_id": ObjectId(question_id)})
+                                
+                                if question:
+                                    with st.form("edit_question_form"):
+                                        q_text = st.text_area("Question", value=question.get('question', ''))
+                                        
+                                        options = []
+                                        correct_option = question.get('correct_option', '')
+                                        
+                                        for opt in question.get('options', []):
+                                            col1, col2, col3 = st.columns([1, 3, 1])
+                                            
+                                            with col1:
+                                                letter = st.text_input("Letter", value=opt.get('letter', ''), key=f"letter_{opt.get('letter', '')}")
+                                            
+                                            with col2:
+                                                text = st.text_input("Text", value=opt.get('text', ''), key=f"text_{opt.get('letter', '')}")
+                                            
+                                            with col3:
+                                                is_correct = st.checkbox("Correct", value=(opt.get('letter', '') == correct_option), key=f"correct_{opt.get('letter', '')}")
+                                                if is_correct:
+                                                    correct_option = letter
+                                            
+                                            options.append({"letter": letter, "text": text})
+                                        
+                                        if st.form_submit_button("Update Question"):
+                                            success, message = update_question(question_id, q_text, options, correct_option)
+                                            if success:
+                                                st.success(message)
+                                                st.session_state.editing_question = False
+                                                st.session_state.selected_question_id = None
+                                                # Clear cache to refresh questions
+                                                st.cache_data.clear()
+                                                st.rerun()
+                                            else:
+                                                st.error(message)
+                                
+                                if st.button("Cancel Editing"):
+                                    st.session_state.editing_question = False
+                                    st.session_state.selected_question_id = None
+                                    st.rerun()
+                        else:
+                            st.info(f"No questions found for topic '{selected_topic}'. Create questions in the 'Create Quiz' tab.")
+                    else:
+                        st.info("No topics available. Create a quiz first in the 'Create Quiz' tab.")
+                
+                # Quiz Stats Tab
+                with admin_tabs[2]:
+                    render_admin_quiz_stats()
             
-            # My Performance Tab - Using the new enhanced stats with Gemini analysis
-            with user_tabs[2]:
-                render_user_performance_stats()
+            # User View
+            else:
+                user_tabs = st.tabs(["Take Quiz", "My Performance", "Quiz History"])
+                
+                # Take Quiz Tab
+                with user_tabs[0]:
+                    st.header("Take a Quiz")
+                    
+                    if st.session_state.current_quiz is None:
+                        topics = get_topics()
+                        if topics:
+                            col1, col2 = st.columns([2, 1])
+                            
+                            with col1:
+                                selected_topic = st.selectbox("Select Topic", topics)
+                            
+                            with col2:
+                                num_questions = st.number_input("Number of Questions", min_value=1, max_value=10, value=5)
+                            
+                            if st.button("Start Quiz", key="start_quiz_button"):
+                                success, message = start_quiz(selected_topic, num_questions)
+                                if success:
+                                    st.success(message)
+                                    st.rerun()
+                                else:
+                                    st.error(message)
+                        else:
+                            st.info("No quiz topics available. Please contact an administrator.")
+                    else:
+                        # Display current quiz
+                        quiz = st.session_state.current_quiz
+                        st.subheader(f"Quiz: {quiz.get('topic', 'Unknown Topic')}")
+                        
+                        # Calculate progress
+                        total_questions = len(quiz.get('questions', []))
+                        answered_questions = len(st.session_state.user_answers)
+                        progress = int((answered_questions / total_questions) * 100) if total_questions > 0 else 0
+                        
+                        # Display progress bar
+                        st.progress(progress)
+                        st.write(f"Progress: {answered_questions}/{total_questions} questions answered")
+                        
+                        # Show quiz timer
+                        if 'start_time' in quiz:
+                            elapsed_time = datetime.datetime.now() - quiz.get('start_time')
+                            minutes, seconds = divmod(elapsed_time.seconds, 60)
+                            st.write(f"Time elapsed: {minutes}m {seconds}s")
+                        
+                        # Display quiz questions
+                        for i, question in enumerate(quiz.get('questions', [])):
+                            question_id = str(question.get('_id', ''))
+                            
+                            with st.expander(f"Question {i+1}", expanded=(question_id not in st.session_state.user_answers)):
+                                st.markdown(f"**{question.get('question', 'Question text missing')}**")
+                                
+                                # Only show options if not answered yet
+                                if question_id not in st.session_state.user_answers:
+                                    options = []
+                                    for opt in question.get('options', []):
+                                        options.append(opt.get('letter', ''))
+                                    
+                                    selected_option = st.radio(
+                                        "Select your answer:", 
+                                        options,
+                                        format_func=lambda x: f"{x}) " + next((opt.get('text', '') for opt in question.get('options', []) if opt.get('letter', '') == x), ""),
+                                        key=f"question_{question_id}"
+                                    )
+                                    
+                                    if st.button("Submit Answer", key=f"submit_{question_id}"):
+                                        st.session_state.user_answers[question_id] = selected_option
+                                        st.rerun()
+                                else:
+                                    # Show submitted answer
+                                    user_answer = st.session_state.user_answers.get(question_id, '')
+                                    correct_answer = question.get('correct_option', '')
+                                    
+                                    for opt in question.get('options', []):
+                                        letter = opt.get('letter', '')
+                                        text = opt.get('text', '')
+                                        
+                                        if letter == correct_answer and letter == user_answer:
+                                            st.markdown(f"- {letter}) {text} ✓ **Correct!**")
+                                        elif letter == correct_answer:
+                                            st.markdown(f"- {letter}) {text} ✓ **Correct Answer**")
+                                        elif letter == user_answer:
+                                            st.markdown(f"- {letter}) {text} ❌ **Your Answer**")
+                                        else:
+                                            st.markdown(f"- {letter}) {text}")
+                                    
+                                    # Show explanation if all questions answered
+                                    if len(st.session_state.user_answers) == total_questions and st.session_state.show_explanations:
+                                        with st.spinner("Loading explanation..."):
+                                            explanation = get_explanation(
+                                                question.get('question', ''),
+                                                user_answer,
+                                                correct_answer
+                                            )
+                                            st.info(f"**Explanation:** {explanation}")
+                        
+                        # Submit quiz button
+                        col1, col2 = st.columns([1, 1])
+                        
+                        with col1:
+                            if len(st.session_state.user_answers) == total_questions:
+                                if st.session_state.quiz_score is None:
+                                    if st.button("Submit Quiz"):
+                                        success, message = submit_quiz()
+                                        if success:
+                                            st.session_state.show_explanations = True
+                                            st.success(message)
+                                            st.rerun()
+                                        else:
+                                            st.error(message)
+                        
+                        with col2:
+                            if st.button("Cancel Quiz"):
+                                st.session_state.current_quiz = None
+                                st.session_state.user_answers = {}
+                                st.session_state.quiz_score = None
+                                st.session_state.show_explanations = False
+                                st.rerun()
+                        
+                        # Display score and explanations
+                        if st.session_state.quiz_score is not None:
+                            score = st.session_state.quiz_score
+                            percentage = score.get('percentage', 0)
+                            
+                            # Display score with appropriate feedback
+                            if percentage >= 80:
+                                st.success(f"🏆 Great job! Your score: {score.get('score', 0)}/{score.get('total', 0)} ({percentage:.1f}%)")
+                            elif percentage >= 60:
+                                st.info(f"👍 Your score: {score.get('score', 0)}/{score.get('total', 0)} ({percentage:.1f}%)")
+                            else:
+                                st.warning(f"📚 Your score: {score.get('score', 0)}/{score.get('total', 0)} ({percentage:.1f}%). Keep practicing!")
+                            
+                            # Show explanations toggle
+                            show_explain = st.checkbox("Show explanations for all questions", value=st.session_state.show_explanations)
+                            if show_explain != st.session_state.show_explanations:
+                                st.session_state.show_explanations = show_explain
+                                st.rerun()
+                            
+                            # Return to quiz selection
+                            if st.button("Take Another Quiz"):
+                                st.session_state.current_quiz = None
+                                st.session_state.user_answers = {}
+                                st.session_state.quiz_score = None
+                                st.session_state.show_explanations = False
+                                st.rerun()
+                
+                # My Performance Tab
+                with user_tabs[1]:
+                    render_user_performance_stats()
+                
+                # Quiz History Tab
+                with user_tabs[2]:
+                    st.header("My Quiz History")
+                    
+                    history = get_user_quiz_history()
+                    
+                    if history:
+                        # Create a formatted display table
+                        history_data = []
+                        for quiz in history:
+                            quiz_end_time = quiz.get('end_time', datetime.datetime.now())
+                            time_str = quiz_end_time.strftime("%Y-%m-%d %H:%M")
+                            
+                            score = quiz.get('score', 0)
+                            total = quiz.get('total_questions', 0)
+                            percentage = quiz.get('score_percentage', 0)
+                            
+                            # Calculate duration
+                            if 'start_time' in quiz:
+                                duration = quiz_end_time - quiz.get('start_time')
+                                minutes = duration.seconds // 60
+                                seconds = duration.seconds % 60
+                                duration_str = f"{minutes}m {seconds}s"
+                            else:
+                                duration_str = "N/A"
+                            
+                            history_data.append({
+                                "Date": time_str,
+                                "Topic": quiz.get('topic', 'Unknown'),
+                                "Score": f"{score}/{total} ({percentage:.1f}%)",
+                                "Duration": duration_str,
+                                "ID": str(quiz.get('_id', ''))
+                            })
+                        
+                        # Convert to DataFrame for display
+                        history_df = pd.DataFrame(history_data)
+                        st.dataframe(history_df.drop(columns=['ID']), use_container_width=True)
+                        
+                        # Allow viewing details of a specific quiz
+                        selected_quiz_id = st.selectbox(
+                            "Select quiz to view details:",
+                            options=history_df["ID"].tolist(),
+                            format_func=lambda x: f"{history_df[history_df['ID']==x]['Topic'].values[0]} - {history_df[history_df['ID']==x]['Date'].values[0]}"
+                        )
+                        
+                        if selected_quiz_id:
+                            # Find selected quiz
+                            selected_quiz = next((q for q in history if str(q.get("_id", "")) == selected_quiz_id), None)
+                            
+                            if selected_quiz:
+                                st.subheader(f"Quiz Details: {selected_quiz.get('topic', 'Unknown')}")
+                                
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.markdown(f"**Date:** {selected_quiz.get('end_time', datetime.datetime.now()).strftime('%Y-%m-%d %H:%M')}")
+                                with col2:
+                                    st.markdown(f"**Score:** {selected_quiz.get('score', 0)}/{selected_quiz.get('total_questions', 0)} ({selected_quiz.get('score_percentage', 0):.1f}%)")
+                                with col3:
+                                    duration = selected_quiz.get('end_time', datetime.datetime.now()) - selected_quiz.get('start_time', datetime.datetime.now())
+                                    minutes = duration.seconds // 60
+                                    seconds = duration.seconds % 60
+                                    st.markdown(f"**Duration:** {minutes}m {seconds}s")
+                                
+                                # Retrieve actual questions
+                                questions = get_questions_by_topic(selected_quiz.get('topic', ''))
+                                question_map = {str(q.get('_id', '')): q for q in questions}
+                                
+                                # Show questions and answers
+                                for i, (question_id, user_answer) in enumerate(selected_quiz.get('user_answers', {}).items()):
+                                    if question_id in question_map:
+                                        question = question_map[question_id]
+                                        correct_answer = question.get('correct_option', '')
+                                        
+                                        with st.expander(f"Question {i+1}"):
+                                            st.markdown(f"**{question.get('question', '')}**")
+                                            
+                                            for opt in question.get('options', []):
+                                                letter = opt.get('letter', '')
+                                                text = opt.get('text', '')
+                                                
+                                                if letter == correct_answer and letter == user_answer:
+                                                    st.markdown(f"- {letter}) {text} ✓ **Correct!**")
+                                                elif letter == correct_answer:
+                                                    st.markdown(f"- {letter}) {text} ✓ **Correct Answer**")
+                                                elif letter == user_answer:
+                                                    st.markdown(f"- {letter}) {text} ❌ **Your Answer**")
+                                                else:
+                                                    st.markdown(f"- {letter}) {text}")
+                                            
+                                            # Show AI explanation
+                                            with st.spinner("Loading explanation..."):
+                                                explanation = get_explanation(
+                                                    question.get('question', ''),
+                                                    user_answer,
+                                                    correct_answer
+                                                )
+                                                st.info(f"**Explanation:** {explanation}")
+# End of the previous code block (user view)
+                    else:
+                        st.info("You haven't taken any quizzes yet. Start by taking a quiz!")
 
-    # Display active tab if specified
-    if 'active_tab' in st.session_state and st.session_state.active_tab:
-        if st.session_state.active_tab == "Take Quiz":
-            user_tabs[1].active = True
-        elif st.session_state.active_tab == "Available Quizzes":
-            user_tabs[0].active = True
-        
-        # Clear the active tab
-        st.session_state.active_tab = None
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        st.error("Please refresh the page and try again.")
 
-# Run the application
 if __name__ == "__main__":
     main()
